@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+    <title>Socket.IO chat</title>
+    <style>
+      body {
+        margin: 0;
+        padding-bottom: 3rem;
+        font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto,
+          Helvetica, Arial, sans-serif;
+      }
+
+      #form {
+        background: rgba(0, 0, 0, 0.15);
+        padding: 0.25rem;
+        position: fixed;
+        bottom: 0;
+        left: 0;
+        right: 0;
+        display: flex;
+        height: 3rem;
+        box-sizing: border-box;
+        backdrop-filter: blur(10px);
+      }
+      #roomInput {
+        border: none;
+        padding: 0 1rem;
+        flex-grow: 1;
+        border-radius: 2rem;
+        margin: 0.25rem;
+      }
+      #roomInput:focus {
+        outline: none;
+      }
+      #form > button {
+        background: #333;
+        border: none;
+        padding: 0 1rem;
+        margin: 0.25rem;
+        border-radius: 3px;
+        outline: none;
+        color: #fff;
+      }
+
+      .center {
+        text-align: center;
+      }
+      #video-chat-room {
+        width: 100vw;
+        border: 1px solid red;
+        display: flex;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="video-chat-lobby">
+      <h2 class="center">Video Chat App</h2>
+      <form id="form" action="">
+        <input
+          id="roomInput"
+          placeholder="please input a room name"
+          autocomplete="off"
+        /><button id="join">Join</button>
+      </form>
+    </div>
+    <div id="video-chat-room">
+      <video id="user-video" width="300px"></video>
+      <video id="peer-video" width="300px"></video>
+    </div>
+  </body>
+  <script src="/socket.io/socket.io.js"></script>
+  <script>
+    // 在客户端引入websocket，signaling的过程是需要用到websocket来实现的
+    const socket = io();
+
+    // 获取dom元素
+    let videoChatLobby = document.querySelector("#video-chat-lobby");
+    let videoChatRoom = document.querySelector("#video-chat-room");
+    let userVideo = document.getElementById("user-video");
+    let peerVideo = document.getElementById("peer-video");
+    const form = document.getElementById("form");
+    const roomInput = document.getElementById("roomInput");
+    var roomName;
+    var userStream;
+
+    // 标注主持人或是加入者
+    let creator = false;
+
+    // 创建一个ICE Server，这个ICE Server在加入方ready之后使用，client通过访问ICE server来获取通信方的IP
+    // 这种stun server就在mozila搜索，用别人的服务
+    let iceServer = {
+      iceServers: [
+        { urls: "stun:stun.l.google.com:19302" },
+        { urls: "stun:stun01.sipphone.com" },
+      ],
+    };
+    /*
+     *加入者join，服务端emit ready，客户端在on Ready之后，
+     不仅要通过ICE Server获取联络方式（子网内或公网IP），还需要通过rtcPeerConnect连接彼此
+     */
+    let rtcPeerConnection = RTCPeerConnection;
+    // when click the button, get the media
+    form.addEventListener("submit", (e) => {
+      e.preventDefault();
+      roomName = roomInput.value;
+      if (roomName) {
+        // we need let the server know the video room's name, the server is going ro find out is the room full or not, and answer the client
+        socket.emit("join", roomName);
+      } else {
+        alert("please input roomName");
+      }
+    });
+
+    // 前端发送join，后端进行判断，当没有这个名字的room时，则执行创建，并反馈前端说：我创建了，这时候前端就应该getMedia
+    socket.on("Created", async () => {
+      creator = true;
+      // get media
+      userStream = await getMedia({
+        audio: true,
+        video: { width: 500 },
+      });
+      // load media & play media
+      loadAndPlay(userStream, userVideo);
+    });
+
+    // 当加入者加入时，前端需要有提醒
+    socket.on("Joined", async () => {
+      creator = false;
+      // get media
+      userStream = await getMedia({
+        audio: true,
+        video: { width: 500 },
+      });
+      debugger;
+      // load media & play media
+      loadAndPlay(userStream, userVideo);
+
+      // joined之后，加入者需要告知主持人ready，这个过程也是通过服务器传递的
+      socket.emit("ready", roomName);
+    });
+    // 当房间人已经满了时，前端需要有提醒
+    socket.on("Fulled", () => {
+      alert("Room is full on join");
+    });
+
+    // 加入之后，让主持人知道加入成功了（ready）
+    socket.on("ready", () => {
+      // onReady，主持人收到ready之后，需要获取加入者的公网IP，这就要用到ICE FrameWork，需要新建一个ICE Server，然后访问，从起那里获取IP
+      console.log(creator);
+      if (creator) {
+        rtcPeerConnection = new RTCPeerConnection(iceServer);
+        rtcPeerConnection.onicecandidate = onIceCandidate;
+        // 没懂ontrack的问题
+        console.log(userStream);
+        rtcPeerConnection.ontrack = onTrack;
+        // 0-audio
+        rtcPeerConnection.addTrack(userStream.getTracks()[0], userStream);
+        // 1-video
+        rtcPeerConnection.addTrack(userStream.getTracks()[1], userStream);
+        // send offer
+        rtcPeerConnection
+          .createOffer()
+          .then((offer) => {
+            rtcPeerConnection.setLocalDescription(offer);
+            socket.emit("offer", offer, roomName);
+          })
+          .catch((reason) => {
+            console.log("something wrong", reason);
+          });
+      }
+    });
+
+    // 交换candidate之后，主持人发送SDP相关的信息，也就是offer
+    socket.on("offer", (offer) => {
+      // 接收者收到offer后，应该把自己的stream传给发起者
+      debugger;
+      if (!creator) {
+        rtcPeerConnection = new RTCPeerConnection(iceServer);
+        rtcPeerConnection.onicecandidate = onIceCandidate;
+        // 没懂ontrack的问题
+        console.log(userStream);
+        debugger;
+        rtcPeerConnection.ontrack = onTrack;
+        // 0-audio
+        rtcPeerConnection.addTrack(userStream.getTracks()[0], userStream);
+        // 1-video
+        rtcPeerConnection.addTrack(userStream.getTracks()[1], userStream);
+
+        // 设置另一端的描
+        rtcPeerConnection.setRemoteDescription(offer);
+
+        // send anser
+        rtcPeerConnection
+          .createAnswer()
+          .then((answer) => {
+            rtcPeerConnection.setLocalDescription(answer);
+            socket.emit("answer", answer, roomName);
+          })
+          .catch((reason) => {
+            console.log("something wrong", reason);
+          });
+      }
+    });
+
+    // 收到offer后，加入者需要发送answer
+    socket.on("answer", (answer) => {
+      // 设置另一端的描述
+      rtcPeerConnection.setRemoteDescription(answer);
+    });
+
+    // 知道彼此offer之后，需要将candidate放入rtcPeerConnection，我想有点想目标IP与源IP
+    socket.on("candidate", (candidate) => {
+      // candidate不能直接用，必须包装一层
+      let iceCandidate = new RTCIceCandidate(candidate);
+      rtcPeerConnection.addIceCandidate(iceCandidate);
+    });
+
+    // get media, return
+    async function getMedia(constraints) {
+      try {
+        return await navigator.mediaDevices.getUserMedia(constraints);
+      } catch (error) {
+        console.log(error);
+      }
+    }
+
+    // display media
+    function loadAndPlay(stream, videoBox) {
+      videoChatLobby.style = "display :none";
+      videoBox.srcObject = stream;
+      videoBox.onloadedmetadata = () => videoBox.play();
+    }
+    // get candidate
+    function onIceCandidate(event) {
+      console.log("got candidator?");
+      // 获取了candidate就应该发给后端，让后代端发给另一方
+      if (event.candidate) {
+        socket.emit("candidate", event.candidate, roomName);
+      }
+    }
+    // on Track
+    function onTrack(event) {
+      // load media & play media
+      // loadAndPlay(event.streams[0], peerVideo);
+      peerVideo.srcObject = event.streams[0];
+      peerVideo.onloadedmetadata = () => peerVideo.play();
+      return false;
+    }
+  </script>
+</html>
